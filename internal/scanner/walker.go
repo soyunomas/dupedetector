@@ -13,17 +13,27 @@ import (
 // Config define las reglas para el escaneo.
 type Config struct {
 	MinSize   int64    // Tamaño mínimo en bytes para considerar
-	Excludes  []string // Lista de carpetas a ignorar (ej: ".git", "node_modules")
+	Excludes  []string // Lista de carpetas a ignorar
 }
 
 // FileScanner encapsula la lógica de recorrido del sistema de archivos.
 type FileScanner struct {
-	cfg Config
+	cfg        Config
+	excludeMap map[string]struct{} // Optimización O(1)
 }
 
 // New crea una nueva instancia del escáner con configuración.
 func New(cfg Config) *FileScanner {
-	return &FileScanner{cfg: cfg}
+	// Pre-procesamos excludes a un mapa para búsquedas instantáneas
+	exMap := make(map[string]struct{}, len(cfg.Excludes))
+	for _, e := range cfg.Excludes {
+		exMap[e] = struct{}{}
+	}
+
+	return &FileScanner{
+		cfg:        cfg,
+		excludeMap: exMap,
+	}
 }
 
 // Scan recorre rootDir y devuelve un mapa inicial agrupado por tamaño.
@@ -37,14 +47,12 @@ func (s *FileScanner) Scan(rootDir string) (map[int64]*entities.FileGroup, error
 	err := filepath.WalkDir(rootDir, func(path string, d fs.DirEntry, err error) error {
 		// 1. Manejo de errores de acceso (permisos, etc)
 		if err != nil {
-			// En una app robusta, logueamos el error y continuamos, no paramos todo.
-			// fmt.Fprintf(os.Stderr, "⚠️ Error accediendo a %s: %v\n", path, err)
 			return nil 
 		}
 
-		// 2. Si es directorio, verificamos si debemos ignorarlo
+		// 2. Si es directorio, verificamos si debemos ignorarlo (Optimizado)
 		if d.IsDir() {
-			if s.shouldIgnoreDir(d.Name()) {
+			if _, ok := s.excludeMap[d.Name()]; ok {
 				return filepath.SkipDir
 			}
 			return nil
@@ -72,7 +80,7 @@ func (s *FileScanner) Scan(rootDir string) (map[int64]*entities.FileGroup, error
 			ModTime:  info.ModTime(),
 			DeviceID: devID,
 			Inode:    inode,
-			// Hash se calculará en la siguiente fase (Fase 2), aquí lo dejamos en 0
+			// Hash se calculará en la siguiente fase (Fase 2)
 		}
 
 		// 6. Agrupar
@@ -87,24 +95,11 @@ func (s *FileScanner) Scan(rootDir string) (map[int64]*entities.FileGroup, error
 	return filesBySize, err
 }
 
-// shouldIgnoreDir verifica si la carpeta está en la lista de exclusión.
-func (s *FileScanner) shouldIgnoreDir(name string) bool {
-	// Implementación básica O(N). Para muchas exclusiones, usar un map[string]bool sería O(1).
-	for _, excl := range s.cfg.Excludes {
-		if name == excl {
-			return true
-		}
-	}
-	return false
-}
-
 // getSysInfo extrae DeviceID e Inode de forma "segura".
-// Nota: Sys() devuelve interface{}, necesitamos aserción de tipos.
 func getSysInfo(info fs.FileInfo) (uint64, uint64) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return 0, 0 // No soportado (ej. Windows en algunos contextos), pero no rompemos.
+		return 0, 0 
 	}
-	// Conversión segura para compatibilidad multi-arquitectura
 	return uint64(stat.Dev), uint64(stat.Ino)
 }

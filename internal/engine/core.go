@@ -5,7 +5,6 @@ import (
 	"os"
 	"runtime"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/soyunomas/dupedetector/internal/entities"
@@ -17,16 +16,16 @@ import (
 type KeepStrategy int
 
 const (
-	KeepShortestPath KeepStrategy = iota // Default: Ruta más corta ("/a" gana a "/copy/a")
-	KeepLongestPath                      // Ruta más larga gana
-	KeepOldest                           // Fecha de modificación más antigua gana
-	KeepNewest                           // Fecha de modificación más reciente gana
+	KeepShortestPath KeepStrategy = iota // Default
+	KeepLongestPath
+	KeepOldest
+	KeepNewest
 )
 
 type Options struct {
 	MinSize  int64
 	Excludes []string
-	Strategy KeepStrategy // Nueva opción de configuración
+	Strategy KeepStrategy
 }
 
 type Stats struct {
@@ -89,7 +88,6 @@ func (r *Runner) Run(rootDir string) (*Stats, error) {
 	fmt.Println("\n   -> Hashing terminado.")
 
 	// --- PASO 4: ORDENAR Y FINALIZAR ---
-	// Pasamos la estrategia elegida por el usuario
 	sortGroups(finalGroups, r.opts.Strategy)
 
 	var dupesCount int64
@@ -107,7 +105,7 @@ func (r *Runner) Run(rootDir string) (*Stats, error) {
 	}, nil
 }
 
-// processPreHash ejecuta el hashing parcial
+// processPreHash: Optimizada para velocidad bruta.
 func (r *Runner) processPreHash(paths []string) map[uint64][]string {
 	type job struct{ path string }
 	type result struct {
@@ -116,30 +114,32 @@ func (r *Runner) processPreHash(paths []string) map[uint64][]string {
 		err  error
 	}
 
+	// Restauramos buffer completo para evitar bloqueo de workers
 	jobs := make(chan job, len(paths))
 	results := make(chan result, len(paths))
 
 	numWorkers := runtime.NumCPU()
 	var wg sync.WaitGroup
 
-	worker := func() {
-		defer wg.Done()
-		for j := range jobs {
-			h, err := hasher.HashFirstBlock(j.path)
-			results <- result{j.path, h, err}
-		}
-	}
-
+	// Workers
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker()
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				h, err := hasher.HashFirstBlock(j.path)
+				results <- result{j.path, h, err}
+			}
+		}()
 	}
 
+	// Llenamos la cola a máxima velocidad
 	for _, p := range paths {
 		jobs <- job{p}
 	}
 	close(jobs)
 
+	// Monitor de cierre
 	go func() {
 		wg.Wait()
 		close(results)
@@ -147,9 +147,11 @@ func (r *Runner) processPreHash(paths []string) map[uint64][]string {
 
 	groups := make(map[uint64][]string)
 	processed := 0
+	
+	// Consumidor sin bloqueos
 	for res := range results {
 		processed++
-		if processed%100 == 0 {
+		if processed%200 == 0 { // Menos I/O a consola
 			fmt.Print(".")
 		}
 		if res.err == nil {
@@ -159,32 +161,32 @@ func (r *Runner) processPreHash(paths []string) map[uint64][]string {
 	return groups
 }
 
-// processFullHash ejecuta el hashing completo
+// processFullHash: Workers + Stat eficiente
 func (r *Runner) processFullHash(paths []string) map[uint64]*entities.FileGroup {
 	type job struct{ path string }
 	type result struct {
-		path string
-		hash uint64
-		err  error
+		path  string
+		hash  uint64
+		stats hasher.FileStats
+		err   error
 	}
 
+	// Restauramos buffer completo
 	jobs := make(chan job, len(paths))
 	results := make(chan result, len(paths))
 
 	numWorkers := runtime.NumCPU()
 	var wg sync.WaitGroup
 
-	worker := func() {
-		defer wg.Done()
-		for j := range jobs {
-			h, err := hasher.HashFile(j.path)
-			results <- result{j.path, h, err}
-		}
-	}
-
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker()
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				h, stats, err := hasher.HashFile(j.path)
+				results <- result{j.path, h, stats, err}
+			}
+		}()
 	}
 
 	for _, p := range paths {
@@ -202,7 +204,7 @@ func (r *Runner) processFullHash(paths []string) map[uint64]*entities.FileGroup 
 
 	for res := range results {
 		processed++
-		if processed%10 == 0 {
+		if processed%50 == 0 { // Menos print para no saturar stdout
 			fmt.Print("#")
 		}
 
@@ -213,32 +215,22 @@ func (r *Runner) processFullHash(paths []string) map[uint64]*entities.FileGroup 
 			groups[res.hash] = &entities.FileGroup{}
 		}
 
-		var size int64
-		var devID, inode uint64
-
-		if info, err := os.Stat(res.path); err == nil {
-			size = info.Size()
-			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-				devID = uint64(stat.Dev)
-				inode = uint64(stat.Ino)
+		// Stat solo si es estrictamente necesario para la estrategia
+		var modTime time.Time
+		if r.opts.Strategy == KeepOldest || r.opts.Strategy == KeepNewest {
+			if info, err := os.Stat(res.path); err == nil {
+				modTime = info.ModTime()
 			}
 		}
 
 		groups[res.hash].Add(&entities.FileInfo{
 			Path:     res.path,
 			Hash:     res.hash,
-			Size:     size,
-			DeviceID: devID,
-			Inode:    inode,
-			// Importante: scanner no setea ModTime, lo recuperamos aquí o usamos Stat arriba
-			// Para optimizar, asumimos que se necesita ModTime para el sorter "oldest/newest".
-			// Stat ya nos dio 'info', extraemos ModTime.
+			Size:     res.stats.Size,
+			DeviceID: res.stats.DeviceID,
+			Inode:    res.stats.Inode,
+			ModTime:  modTime,
 		})
-		
-		// Un pequeño fix: Recuperar ModTime si no venía del scanner o si queremos precisión fresca
-		if info, err := os.Stat(res.path); err == nil {
-			groups[res.hash].Files[len(groups[res.hash].Files)-1].ModTime = info.ModTime()
-		}
 	}
 	return groups
 }
