@@ -17,7 +17,9 @@ Una herramienta CLI para encontrar y gestionar archivos duplicados en el sistema
 
 ## Instalación
 
-Necesitas tener Go instalado.
+### Compilación local
+
+Necesitas tener Go y `make` instalados.
 
 ```bash
 git clone https://github.com/soyunomas/dupedetector.git
@@ -26,6 +28,18 @@ make build
 ```
 
 Esto generará el binario `dupedetector` en la raíz.
+
+### Objetivos de `make`
+
+| Comando | Acción |
+|---|---|
+| `make` o `make build` | Compila el binario optimizado `dupedetector`. |
+| `make build-nas` | Compila el binario Linux ARM64 `dupedetector-linux-arm64`. |
+| `make run` | Compila y ejecuta el programa sobre el directorio actual. |
+| `make test` | Ejecuta los tests unitarios. |
+| `make clean` | Elimina binarios, scripts `.sh` generados y `TRASH_BIN`. |
+| `make tidy` | Ordena las dependencias de Go. |
+| `make help` | Muestra la ayuda de los comandos disponibles. |
 
 ## Uso
 
