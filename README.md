@@ -52,6 +52,7 @@ Solo muestra los duplicados encontrados sin borrar nada.
 
 ### Estrategias de Conservación (`-keep`)
 Define qué archivo se considera el "Original" (Keeper) y cuáles se marcan para borrar.
+Las estrategias se aplican después de verificar que los archivos tienen contenido idéntico, por lo que todos los integrantes de un grupo tienen el mismo tamaño. `shortest` y `longest` se refieren a la longitud de la **ruta**, no al tamaño del archivo.
 
 *   `shortest`: Mantiene la ruta más corta (Default).
 *   `longest`: Mantiene la ruta más larga.
